@@ -1,4 +1,4 @@
-name: Build Injetor REMOTE Hardened IPA
+name: Build Injetor REMOTE IPA
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ jobs:
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE"
+
           rm -rf source build Payload
           mkdir -p source
 
@@ -33,23 +34,33 @@ jobs:
               break
             fi
           done < <(
-            find "$GITHUB_WORKSPACE" -maxdepth 3 \
-              -type f -name '*.zip' -print
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 3 \
+              -type f \
+              -name '*.zip' \
+              -print
           )
 
           if [ -n "$SOURCE_ZIP" ]; then
-            echo "Source ZIP: $SOURCE_ZIP"
+            echo "========================================"
+            echo "SOURCE ZIP"
+            echo "========================================"
+            echo "$SOURCE_ZIP"
 
             unzip -q "$SOURCE_ZIP" \
               -d "$GITHUB_WORKSPACE/source" \
               -x '__MACOSX/*' '*/__MACOSX/*'
 
             find "$GITHUB_WORKSPACE/source" \
-              -type f -name '._*' -delete || true
+              -type f \
+              -name '._*' \
+              -delete || true
 
             SEARCH_ROOT="$GITHUB_WORKSPACE/source"
           else
-            echo "Projeto ja extraido no repositorio."
+            echo "Nenhum ZIP encontrado."
+            echo "Usando projeto extraido diretamente no repositorio."
+
             SEARCH_ROOT="$GITHUB_WORKSPACE"
           fi
 
@@ -62,15 +73,130 @@ jobs:
 
           if [ -z "$PROJECT" ]; then
             echo "ERRO: ThreeOneOSFive.xcodeproj nao encontrado."
+
+            echo
+            echo "Arquivos encontrados:"
+            find "$SEARCH_ROOT" \
+              -maxdepth 5 \
+              -type f \
+              -print | head -n 300
+
             exit 1
           fi
 
           ROOT="$(dirname "$PROJECT")"
           APPDIR="$ROOT/ThreeOneOSFive"
 
-          AUTH_SOURCE="$APPDIR/Auth/RemoteAuth.mm"
-          AUTH_GIF="$APPDIR/Auth/icon.gif"
-          AUTH="$APPDIR/Auth/RemoteAuth.dylib"
+          echo
+          echo "========================================"
+          echo "PROJETO"
+          echo "========================================"
+
+          echo "PROJECT: $PROJECT"
+          echo "ROOT:    $ROOT"
+          echo "APPDIR:  $APPDIR"
+
+          # ------------------------------------------------------
+          # LOCALIZAR REMOTEAUTH.MM
+          # ------------------------------------------------------
+
+          AUTH_SOURCE="$(find "$ROOT" \
+            -type f \
+            -name 'RemoteAuth.mm' \
+            ! -path '*/__MACOSX/*' \
+            -print -quit)"
+
+          if [ -z "$AUTH_SOURCE" ]; then
+
+            AUTH_SOURCE="$(find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name 'RemoteAuth.mm' \
+              ! -path '*/__MACOSX/*' \
+              ! -path '*/build/*' \
+              -print -quit)"
+
+          fi
+
+          if [ -z "$AUTH_SOURCE" ]; then
+            echo
+            echo "========================================"
+            echo "ERRO"
+            echo "========================================"
+
+            echo "RemoteAuth.mm nao encontrada."
+
+            echo
+            echo "Procurando arquivos RemoteAuth existentes:"
+
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              \( \
+                -iname '*remote*auth*' \
+                -o \
+                -iname '*.mm' \
+              \) \
+              -print || true
+
+            exit 1
+          fi
+
+          # ------------------------------------------------------
+          # LOCALIZAR ICON.GIF
+          # ------------------------------------------------------
+
+          AUTH_GIF="$(find "$(dirname "$AUTH_SOURCE")" \
+            -maxdepth 2 \
+            -type f \
+            -name 'icon.gif' \
+            -print -quit || true)"
+
+          if [ -z "$AUTH_GIF" ]; then
+
+            AUTH_GIF="$(find "$ROOT" \
+              -type f \
+              -name 'icon.gif' \
+              ! -path '*/__MACOSX/*' \
+              -print -quit)"
+
+          fi
+
+          if [ -z "$AUTH_GIF" ]; then
+
+            AUTH_GIF="$(find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name 'icon.gif' \
+              ! -path '*/__MACOSX/*' \
+              ! -path '*/build/*' \
+              -print -quit)"
+
+          fi
+
+          if [ -z "$AUTH_GIF" ]; then
+            echo
+            echo "========================================"
+            echo "ERRO"
+            echo "========================================"
+
+            echo "icon.gif nao encontrado."
+
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              \( \
+                -iname '*.gif' \
+                -o \
+                -iname '*icon*' \
+              \) \
+              -print || true
+
+            exit 1
+          fi
+
+          # ------------------------------------------------------
+          # DESTINO DA DYLIB
+          # ------------------------------------------------------
+
+          AUTH_DIR="$(dirname "$AUTH_SOURCE")"
+          AUTH="$AUTH_DIR/RemoteAuth.dylib"
 
           PATCHES_DIR="$APPDIR/Patches"
           GENERATED_DIR="$APPDIR/Generated"
@@ -81,45 +207,86 @@ jobs:
           PATCH_BRIDGE="$APPDIR/helpers/PatchVaultBridge.generated.c"
           VAULT_GENERATOR="$ROOT/tools/build_patch_vault.py"
 
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
-          echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
-
-          echo "AUTH_SOURCE=$AUTH_SOURCE" >> "$GITHUB_ENV"
-          echo "AUTH_GIF=$AUTH_GIF" >> "$GITHUB_ENV"
-          echo "AUTH=$AUTH" >> "$GITHUB_ENV"
-
-          echo "PATCHES_DIR=$PATCHES_DIR" >> "$GITHUB_ENV"
-          echo "GENERATED_DIR=$GENERATED_DIR" >> "$GITHUB_ENV"
-
-          echo "VAULT=$VAULT" >> "$GITHUB_ENV"
-          echo "RESOURCE_VAULT=$RESOURCE_VAULT" >> "$GITHUB_ENV"
-          echo "PATCH_BRIDGE=$PATCH_BRIDGE" >> "$GITHUB_ENV"
-          echo "VAULT_GENERATOR=$VAULT_GENERATOR" >> "$GITHUB_ENV"
-
           mkdir -p "$PATCHES_DIR"
           mkdir -p "$GENERATED_DIR"
-          mkdir -p "$APPDIR/Auth"
 
+          echo
           echo "========================================"
-          echo "SOURCE"
+          echo "AUTH LOCALIZADA"
           echo "========================================"
 
-          echo "PROJECT: $PROJECT"
-          echo "ROOT:    $ROOT"
+          echo "RemoteAuth.mm:"
+          echo "$AUTH_SOURCE"
+
+          echo
+          echo "icon.gif:"
+          echo "$AUTH_GIF"
+
+          echo
+          echo "RemoteAuth.dylib sera criada em:"
+          echo "$AUTH"
+
+          # ------------------------------------------------------
+          # EXPORTAR VARIAVEIS
+          # ------------------------------------------------------
+
+          {
+            echo "PROJECT=$PROJECT"
+            echo "ROOT=$ROOT"
+            echo "APPDIR=$APPDIR"
+
+            echo "AUTH_SOURCE=$AUTH_SOURCE"
+            echo "AUTH_GIF=$AUTH_GIF"
+            echo "AUTH=$AUTH"
+
+            echo "PATCHES_DIR=$PATCHES_DIR"
+            echo "GENERATED_DIR=$GENERATED_DIR"
+
+            echo "VAULT=$VAULT"
+            echo "RESOURCE_VAULT=$RESOURCE_VAULT"
+
+            echo "PATCH_BRIDGE=$PATCH_BRIDGE"
+            echo "VAULT_GENERATOR=$VAULT_GENERATOR"
+          } >> "$GITHUB_ENV"
 
       - name: Show Xcode version
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "========================================"
+          echo "XCODE"
+          echo "========================================"
+
           xcodebuild -version
+
+          echo
+          echo "SDKs:"
           xcodebuild -showsdks
+
+          echo
+          echo "iPhoneOS SDK:"
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Build RemoteAuth dylib
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "========================================"
+          echo "BUILD REMOTEAUTH"
+          echo "========================================"
+
+          echo "SOURCE:"
+          echo "$AUTH_SOURCE"
+
+          echo
+          echo "GIF:"
+          echo "$AUTH_GIF"
+
+          echo
+          echo "OUTPUT:"
+          echo "$AUTH"
 
           test -s "$AUTH_SOURCE" || {
             echo "ERRO: RemoteAuth.mm nao encontrada."
@@ -127,17 +294,15 @@ jobs:
           }
 
           test -s "$AUTH_GIF" || {
-            echo "ERRO: Auth/icon.gif nao encontrado."
+            echo "ERRO: icon.gif nao encontrado."
             exit 1
           }
 
           SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
 
-          echo "========================================"
-          echo "BUILD REMOTE AUTH"
-          echo "========================================"
+          mkdir -p "$(dirname "$AUTH")"
 
-          echo "SDK: $SDK_PATH"
+          rm -f "$AUTH"
 
           xcrun --sdk iphoneos clang++ \
             -arch arm64 \
@@ -165,7 +330,13 @@ jobs:
           }
 
           echo
-          echo "RemoteAuth:"
+          echo "========================================"
+          echo "DYLIB GERADA"
+          echo "========================================"
+
+          ls -lh "$AUTH"
+
+          echo
           file "$AUTH"
 
           echo
@@ -178,7 +349,11 @@ jobs:
 
           echo
           echo "GIF embutido:"
-          otool -l "$AUTH" | grep -A6 "__eaicon"
+          otool -l "$AUTH" \
+            | grep -A8 "__eaicon" || {
+                echo "ERRO: secao __eaicon nao encontrada."
+                exit 1
+              }
 
           echo
           echo "SHA256:"
@@ -194,24 +369,46 @@ jobs:
           echo "========================================"
 
           test -s "$RESOURCE_VAULT" || {
-            echo "ERRO: resourcevault.bin ausente."
+            echo "ERRO: resourcevault.bin ausente:"
+            echo "$RESOURCE_VAULT"
             exit 1
           }
 
+          # Corrigir extensao duplicada, caso exista.
+          find "$PATCHES_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.3105.3105' \
+            | while IFS= read -r FILE; do
+
+                NEW="${FILE%.3105}"
+
+                echo "Renomeando:"
+                echo "$FILE"
+                echo "-> $NEW"
+
+                mv "$FILE" "$NEW"
+              done
+
+          # Se remote.3105 nao estiver dentro da source,
+          # procurar no repositorio.
           if [ ! -f "$PATCHES_DIR/remote.3105" ]; then
 
             REPO_PATCH="$(find "$GITHUB_WORKSPACE" \
               -type f \
               -name 'remote.3105' \
               ! -path "$PATCHES_DIR/*" \
+              ! -path '*/__MACOSX/*' \
               -print -quit || true)"
 
             if [ -n "$REPO_PATCH" ]; then
+
               echo "remote.3105 encontrado:"
               echo "$REPO_PATCH"
 
               cp "$REPO_PATCH" \
                 "$PATCHES_DIR/remote.3105"
+
             fi
           fi
 
@@ -222,27 +419,32 @@ jobs:
             | wc -l \
             | tr -d ' ')"
 
-          echo "Arquivos .3105: $RAW_COUNT"
+          echo
+          echo "Quantidade de .3105: $RAW_COUNT"
 
           if [ "$RAW_COUNT" -gt 0 ]; then
 
             if [ "$RAW_COUNT" -ne 1 ]; then
-              echo "ERRO: REMOTE exige exatamente um .3105."
+
+              echo "ERRO: REMOTE deve possuir exatamente 1 arquivo .3105."
+
               find "$PATCHES_DIR" \
                 -maxdepth 1 \
                 -type f \
                 -name '*.3105' \
                 -print
+
               exit 1
             fi
 
-            test -f "$PATCHES_DIR/remote.3105" || {
-              echo "ERRO: o arquivo precisa se chamar remote.3105"
+            test -s "$PATCHES_DIR/remote.3105" || {
+              echo "ERRO: remote.3105 nao encontrado."
               exit 1
             }
 
-            test -f "$VAULT_GENERATOR" || {
-              echo "ERRO: build_patch_vault.py ausente."
+            test -s "$VAULT_GENERATOR" || {
+              echo "ERRO: build_patch_vault.py nao encontrado:"
+              echo "$VAULT_GENERATOR"
               exit 1
             }
 
@@ -264,15 +466,16 @@ jobs:
               --bridge "$PATCH_BRIDGE"
 
             test -s "$VAULT" || {
-              echo "ERRO: patchvault.bin nao gerado."
+              echo "ERRO: patchvault.bin nao foi gerado."
               exit 1
             }
 
             test -s "$PATCH_BRIDGE" || {
-              echo "ERRO: PatchVaultBridge.generated.c nao gerado."
+              echo "ERRO: PatchVaultBridge.generated.c nao foi gerado."
               exit 1
             }
 
+            # Nenhum .3105 cru entra no app final.
             find "$PATCHES_DIR" \
               -maxdepth 1 \
               -type f \
@@ -281,8 +484,10 @@ jobs:
 
           else
 
+            echo "Nenhum .3105 cru encontrado."
+
             test -s "$VAULT" || {
-              echo "ERRO: patchvault.bin nao existe e remote.3105 nao foi encontrado."
+              echo "ERRO: patchvault.bin tambem nao existe."
               exit 1
             }
 
@@ -290,6 +495,7 @@ jobs:
               echo "ERRO: PatchVaultBridge.generated.c ausente."
               exit 1
             }
+
           fi
 
           echo
@@ -304,6 +510,10 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+
+          echo "========================================"
+          echo "BUILD INJETOR"
+          echo "========================================"
 
           rm -rf "$GITHUB_WORKSPACE/build"
           rm -f "$GITHUB_WORKSPACE/xcodebuild.log"
@@ -329,14 +539,15 @@ jobs:
 
           if [ "$RC" -ne 0 ]; then
 
+            echo
             echo "========================================"
-            echo "BUILD FALHOU"
+            echo "XCODEBUILD FALHOU"
             echo "========================================"
 
             grep -n -E \
               'error:|fatal error:|BUILD FAILED|SwiftCompile|CompileSwift|Ld ' \
               "$GITHUB_WORKSPACE/xcodebuild.log" \
-              | tail -n 300 || true
+              | tail -n 400 || true
 
             exit "$RC"
           fi
@@ -351,14 +562,43 @@ jobs:
             -name '3105.app' \
             -print -quit)"
 
+          if [ -z "$APP" ]; then
+
+            APP="$(find "$GITHUB_WORKSPACE/build" \
+              -type d \
+              -name '*.app' \
+              -print -quit)"
+
+          fi
+
           test -n "$APP" || {
-            echo "ERRO: 3105.app nao encontrado."
+            echo "ERRO: .app nao encontrado."
             exit 1
           }
 
           EXE="$APP/3105"
 
+          if [ ! -f "$EXE" ]; then
+
+            EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$APP/Info.plist")"
+
+            EXE="$APP/$EXECUTABLE_NAME"
+
+          fi
+
           EMBEDDED_AUTH="$APP/Frameworks/RemoteAuth.dylib"
+
+          echo "========================================"
+          echo "APP"
+          echo "========================================"
+
+          echo "$APP"
+
+          echo
+          echo "Executavel:"
+          echo "$EXE"
 
           test -s "$EXE" || {
             echo "ERRO: executavel principal ausente."
@@ -366,23 +606,32 @@ jobs:
           }
 
           test -s "$EMBEDDED_AUTH" || {
-            echo "ERRO: RemoteAuth.dylib nao foi embutida."
+            echo "ERRO: RemoteAuth.dylib nao foi embutida em Frameworks."
+            find "$APP" -maxdepth 4 -type f -print
             exit 1
           }
 
+          echo
           echo "========================================"
-          echo "REMOTE AUTH"
+          echo "REMOTEAUTH"
           echo "========================================"
 
           if ! otool -L "$EXE" \
             | grep -Fq '@rpath/RemoteAuth.dylib'; then
 
-            echo "ERRO: executavel nao depende da RemoteAuth."
+            echo "ERRO: executavel nao possui LC_LOAD_DYLIB para RemoteAuth."
+
+            echo
             otool -L "$EXE"
+
             exit 1
           fi
 
           echo "RemoteAuth LC_LOAD_DYLIB: OK"
+
+          echo
+          echo "RemoteAuth embutida:"
+          file "$EMBEDDED_AUTH"
 
           echo
           echo "========================================"
@@ -391,13 +640,13 @@ jobs:
 
           otool -l "$EXE" \
             | grep -q 'sectname __pv3105' || {
-              echo "ERRO: __pv3105 ausente."
+              echo "ERRO: secao __pv3105 ausente."
               exit 1
             }
 
           otool -l "$EXE" \
             | grep -q 'sectname __rv3105' || {
-              echo "ERRO: __rv3105 ausente."
+              echo "ERRO: secao __rv3105 ausente."
               exit 1
             }
 
@@ -411,22 +660,27 @@ jobs:
             | tr -d ' ')"
 
           if [ "$RAW_APP" -ne 0 ]; then
-            echo "ERRO: .3105 cru encontrado dentro do app."
-            find "$APP" -type f -name '*.3105' -print
+
+            echo "ERRO: arquivo .3105 cru encontrado dentro do app."
+
+            find "$APP" \
+              -type f \
+              -name '*.3105' \
+              -print
+
             exit 1
           fi
 
           echo
-          echo "Executavel:"
+          echo "========================================"
+          echo "EXECUTAVEL"
+          echo "========================================"
+
           file "$EXE"
 
           echo
           echo "Dependencias:"
           otool -L "$EXE"
-
-          echo
-          echo "RemoteAuth:"
-          file "$EMBEDDED_AUTH"
 
           echo
           echo "SHA256 RemoteAuth:"
@@ -442,10 +696,24 @@ jobs:
             -name '3105.app' \
             -print -quit)"
 
-          EXE="$APP/3105"
+          if [ -z "$APP" ]; then
+
+            APP="$(find "$GITHUB_WORKSPACE/build" \
+              -type d \
+              -name '*.app' \
+              -print -quit)"
+
+          fi
+
+          EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleExecutable' \
+            "$APP/Info.plist")"
+
+          EXE="$APP/$EXECUTABLE_NAME"
 
           strip -S -x "$EXE" || true
 
+          # Limpeza de arquivos que nao precisam estar no pacote.
           rm -rf "$APP/Patches"
           rm -f "$APP/PkgInfo"
 
@@ -458,6 +726,20 @@ jobs:
             -type d \
             -name '3105.app' \
             -print -quit)"
+
+          if [ -z "$APP" ]; then
+
+            APP="$(find "$GITHUB_WORKSPACE/build" \
+              -type d \
+              -name '*.app' \
+              -print -quit)"
+
+          fi
+
+          test -n "$APP" || {
+            echo "ERRO: .app nao encontrado para empacotamento."
+            exit 1
+          }
 
           cd "$GITHUB_WORKSPACE"
 
@@ -484,16 +766,19 @@ jobs:
             exit 1
           }
 
+          echo
           echo "========================================"
-          echo "VALIDANDO IPA FINAL"
+          echo "IPA FINAL"
           echo "========================================"
 
           unzip -l "$IPA" \
             | grep -F \
-              'Payload/Injetor.app/Frameworks/RemoteAuth.dylib'
+              'Payload/Injetor.app/Frameworks/RemoteAuth.dylib' || {
+                echo "ERRO: RemoteAuth.dylib ausente da IPA final."
+                exit 1
+              }
 
           echo
-          echo "IPA:"
           ls -lh "$IPA"
 
           echo
