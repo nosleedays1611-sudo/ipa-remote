@@ -25,19 +25,36 @@ jobs:
           mkdir -p source
 
           SOURCE_ZIP=""
+
           while IFS= read -r ZIP; do
             if unzip -Z1 "$ZIP" 2>/dev/null \
               | grep -qE '(^|/)ThreeOneOSFive\.xcodeproj/project\.pbxproj$'; then
               SOURCE_ZIP="$ZIP"
               break
             fi
-          done < <(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -name '*.zip' -print)
+          done < <(
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 3 \
+              -type f \
+              -name '*.zip' \
+              -print
+          )
 
           if [ -n "$SOURCE_ZIP" ]; then
-            echo "Source ZIP: $SOURCE_ZIP"
-            unzip -q "$SOURCE_ZIP" -d "$GITHUB_WORKSPACE/source" \
+            echo "========================================"
+            echo "SOURCE ZIP"
+            echo "========================================"
+            echo "$SOURCE_ZIP"
+
+            unzip -q "$SOURCE_ZIP" \
+              -d "$GITHUB_WORKSPACE/source" \
               -x '__MACOSX/*' '*/__MACOSX/*'
-            find "$GITHUB_WORKSPACE/source" -type f -name '._*' -delete || true
+
+            find "$GITHUB_WORKSPACE/source" \
+              -type f \
+              -name '._*' \
+              -delete || true
+
             SEARCH_ROOT="$GITHUB_WORKSPACE/source"
           else
             echo "Projeto já extraído no repositório."
@@ -45,12 +62,14 @@ jobs:
           fi
 
           PROJECT="$(find "$SEARCH_ROOT" \
-            -type d -name 'ThreeOneOSFive.xcodeproj' \
-            ! -path '*/__MACOSX/*' ! -path '*/build/*' \
+            -type d \
+            -name 'ThreeOneOSFive.xcodeproj' \
+            ! -path '*/__MACOSX/*' \
+            ! -path '*/build/*' \
             -print -quit)"
 
           test -n "$PROJECT" || {
-            echo 'ERRO: projeto não encontrado.'
+            echo 'ERRO: ThreeOneOSFive.xcodeproj não encontrado.'
             exit 1
           }
 
@@ -100,7 +119,7 @@ jobs:
           mkdir -p "$PATCHES_DIR"
           mkdir -p "$GENERATED_DIR"
 
-          test -f "$AUTHSRC" || {
+          test -s "$AUTHSRC" || {
             echo 'ERRO: AuthSource/RemoteAuth.mm ausente.'
             exit 1
           }
@@ -124,9 +143,27 @@ jobs:
           echo "========================================"
           echo "SOURCE OK"
           echo "========================================"
+
           echo "PROJECT: $PROJECT"
+          echo "ROOT: $ROOT"
+          echo "APPDIR: $APPDIR"
           echo "AUTH SOURCE: $AUTHSRC"
           echo "AUTH OUTPUT: $AUTH"
+
+      - name: Show Xcode version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "XCODE"
+          echo "========================================"
+
+          xcodebuild -version
+
+          echo
+          echo "SDK:"
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Compile RemoteAuth dylib
         shell: bash
@@ -138,6 +175,8 @@ jobs:
           echo "========================================"
 
           SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          mkdir -p "$(dirname "$AUTH")"
 
           rm -f "$AUTH"
 
@@ -161,49 +200,74 @@ jobs:
             -Wl,-sectcreate,__DATA,__eaicon,"$AUTHICON" \
             -o "$AUTH"
 
-          #
-          # IMPORTANTE:
-          # O fingerprint será calculado DEPOIS deste strip.
-          # Assim o Swift recebe exatamente o hash da dylib que será embutida.
-          #
-          strip -S -x "$AUTH" || true
-
-          codesign --remove-signature "$AUTH" 2>/dev/null || true
-
           test -s "$AUTH" || {
             echo 'ERRO: RemoteAuth.dylib não foi criada.'
             exit 1
           }
 
+          #
+          # O fingerprint será calculado sobre a versão
+          # final da dylib depois do strip.
+          #
+          strip -S -x "$AUTH" || true
+
+          codesign --remove-signature "$AUTH" 2>/dev/null || true
+
           echo
-          echo "DYLIB:"
+          echo "========================================"
+          echo "DYLIB GERADA"
+          echo "========================================"
+
+          ls -lh "$AUTH"
+
+          echo
           file "$AUTH"
 
           echo
-          echo "ARQUITETURA:"
+          echo "Arquitetura:"
           lipo -info "$AUTH" || true
 
           echo
-          echo "DEPENDÊNCIAS:"
+          echo "Dependências:"
           otool -L "$AUTH"
+
+          #
+          # NÃO usamos:
+          #
+          # strings | grep -q
+          #
+          # porque set -o pipefail pode interpretar o SIGPIPE
+          # do strings como falha.
+          #
+
+          AUTH_OTOOL="$RUNNER_TEMP/remoteauth-otool.txt"
+          AUTH_STRINGS="$RUNNER_TEMP/remoteauth-strings.txt"
+
+          otool -l "$AUTH" > "$AUTH_OTOOL"
+          strings "$AUTH" > "$AUTH_STRINGS"
 
           echo
           echo "VALIDANDO GIF:"
 
-          otool -l "$AUTH" \
-            | grep -q 'sectname __eaicon' || {
-                echo 'ERRO: GIF não foi embutido em __DATA,__eaicon.'
-                exit 1
-              }
+          if ! grep -q 'sectname __eaicon' "$AUTH_OTOOL"; then
+            echo 'ERRO: GIF não foi embutido em __DATA,__eaicon.'
+            exit 1
+          fi
 
-          strings "$AUTH" \
-            | grep -Fq 'RemoteAuthManager' || {
-                echo 'ERRO: RemoteAuthManager ausente.'
-                exit 1
-              }
+          echo "__eaicon: OK"
 
           echo
-          echo "SHA256 COMPLETO:"
+          echo "VALIDANDO REMOTEAUTHMANAGER:"
+
+          if ! grep -Fq 'RemoteAuthManager' "$AUTH_STRINGS"; then
+            echo 'ERRO: RemoteAuthManager ausente.'
+            exit 1
+          fi
+
+          echo "RemoteAuthManager: OK"
+
+          echo
+          echo "SHA256:"
           shasum -a 256 "$AUTH"
 
       - name: Generate RemoteAuth integrity
@@ -212,17 +276,25 @@ jobs:
           set -euo pipefail
 
           echo "========================================"
-          echo "GERANDO FINGERPRINT DA DYLIB NOVA"
+          echo "GERANDO FINGERPRINT REMOTEAUTH"
           echo "========================================"
 
-          #
-          # ESTE PASSO É ESSENCIAL.
-          #
-          # A versão anterior recompilava RemoteAuth.dylib,
-          # mas podia deixar AuthIntegrity.generated.swift
-          # contendo o fingerprint da build anterior.
-          #
+          test -s "$AUTH" || {
+            echo 'ERRO: RemoteAuth.dylib ausente.'
+            exit 1
+          }
 
+          test -f "$AUTH_GENERATOR" || {
+            echo 'ERRO: generate_auth_integrity.py ausente.'
+            exit 1
+          }
+
+          #
+          # IMPORTANTE:
+          #
+          # O fingerprint é gerado DEPOIS da dylib final
+          # e ANTES do xcodebuild.
+          #
           python3 "$AUTH_GENERATOR" \
             --dylib "$AUTH" \
             --swift "$AUTH_INTEGRITY"
@@ -233,7 +305,7 @@ jobs:
           }
 
           echo
-          echo "AUTH INTEGRITY GERADO:"
+          echo "AuthIntegrity.generated.swift:"
           cat "$AUTH_INTEGRITY"
 
       - name: Prepare encrypted patch vault
@@ -242,30 +314,42 @@ jobs:
           set -euo pipefail
 
           echo "========================================"
-          echo "PREPARANDO PATCH VAULT"
+          echo "PATCH VAULT"
           echo "========================================"
 
-          #
-          # Corrige extensão duplicada, caso exista.
-          #
-          find "$PATCHES_DIR" \
-            -maxdepth 1 \
-            -type f \
-            -name '*.3105.3105' \
-            | while IFS= read -r FILE; do
-
-                NEW="${FILE%.3105}"
-
-                echo "$FILE"
-                echo "->"
-                echo "$NEW"
-
-                mv "$FILE" "$NEW"
-              done
+          test -s "$RESOURCE_VAULT" || {
+            echo "ERRO: resourcevault.bin ausente:"
+            echo "$RESOURCE_VAULT"
+            exit 1
+          }
 
           #
-          # Caso remote.3105 esteja fora do ZIP,
-          # procura no repositório.
+          # Corrigir extensão duplicada.
+          #
+          while IFS= read -r FILE; do
+
+            [ -n "$FILE" ] || continue
+
+            NEW="${FILE%.3105}"
+
+            echo "Renomeando:"
+            echo "$FILE"
+            echo "->"
+            echo "$NEW"
+
+            mv "$FILE" "$NEW"
+
+          done < <(
+            find "$PATCHES_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.3105.3105' \
+              -print
+          )
+
+          #
+          # Procurar remote.3105 no repositório caso
+          # não esteja dentro da source.
           #
           if [ ! -f "$PATCHES_DIR/remote.3105" ]; then
 
@@ -278,6 +362,7 @@ jobs:
 
             if [ -n "$REPO_PATCH" ]; then
 
+              echo
               echo "remote.3105 encontrado:"
               echo "$REPO_PATCH"
 
@@ -299,10 +384,9 @@ jobs:
 
           if [ "$RAW_COUNT" -gt 0 ]; then
 
-            if [ "$RAW_COUNT" -ne 1 ] || \
-               [ ! -f "$PATCHES_DIR/remote.3105" ]; then
+            if [ "$RAW_COUNT" -ne 1 ]; then
 
-              echo 'ERRO: REMOTE exige somente Patches/remote.3105.'
+              echo 'ERRO: REMOTE deve possuir exatamente um .3105.'
 
               find "$PATCHES_DIR" \
                 -maxdepth 1 \
@@ -313,8 +397,14 @@ jobs:
               exit 1
             fi
 
-            test -f "$VAULT_GENERATOR" || {
-              echo 'ERRO: build_patch_vault.py ausente.'
+            test -s "$PATCHES_DIR/remote.3105" || {
+              echo 'ERRO: Patches/remote.3105 ausente.'
+              exit 1
+            }
+
+            test -s "$VAULT_GENERATOR" || {
+              echo "ERRO: build_patch_vault.py ausente:"
+              echo "$VAULT_GENERATOR"
               exit 1
             }
 
@@ -336,17 +426,17 @@ jobs:
               --bridge "$PATCH_BRIDGE"
 
             test -s "$VAULT" || {
-              echo 'ERRO: patchvault.bin não gerado.'
+              echo 'ERRO: patchvault.bin não foi gerado.'
               exit 1
             }
 
             test -s "$PATCH_BRIDGE" || {
-              echo 'ERRO: PatchVaultBridge.generated.c não gerado.'
+              echo 'ERRO: PatchVaultBridge.generated.c não foi gerado.'
               exit 1
             }
 
             #
-            # Nenhum .3105 cru entra no app.
+            # Não deixar .3105 cru no app.
             #
             find "$PATCHES_DIR" \
               -maxdepth 1 \
@@ -356,10 +446,10 @@ jobs:
 
           else
 
-            echo "Nenhum remote.3105 cru encontrado."
+            echo "Nenhum .3105 cru encontrado."
 
             test -s "$VAULT" || {
-              echo 'ERRO: patchvault.bin não existe e remote.3105 não foi encontrado.'
+              echo 'ERRO: patchvault.bin também não existe.'
               exit 1
             }
 
@@ -370,19 +460,13 @@ jobs:
 
           fi
 
-          RAW_LEFT="$(find "$APPDIR" \
-            -type f \
-            -name '*.3105' \
-            | wc -l \
-            | tr -d ' ')"
-
-          test "$RAW_LEFT" -eq 0 || {
-            echo 'ERRO: .3105 cru restante.'
-            exit 1
-          }
+          echo
+          echo "Patch vault:"
+          ls -lh "$VAULT"
 
           echo
-          echo "PATCH VAULT OK"
+          echo "Resource vault:"
+          ls -lh "$RESOURCE_VAULT"
 
       - name: Build unsigned Injetor app
         shell: bash
@@ -419,7 +503,7 @@ jobs:
 
             echo
             echo "========================================"
-            echo "BUILD FALHOU"
+            echo "XCODEBUILD FALHOU"
             echo "========================================"
 
             grep -n -E \
@@ -466,111 +550,160 @@ jobs:
 
           EMBEDDED_AUTH="$APP/Frameworks/RemoteAuth.dylib"
 
-          test -s "$EXE" || {
-            echo 'ERRO: executável ausente.'
-            exit 1
-          }
-
-          test -s "$EMBEDDED_AUTH" || {
-            echo 'ERRO: RemoteAuth.dylib não embutida.'
-            find "$APP" -maxdepth 4 -type f -print
-            exit 1
-          }
+          echo
+          echo "APP:"
+          echo "$APP"
 
           echo
           echo "EXECUTÁVEL:"
           echo "$EXE"
 
+          test -s "$EXE" || {
+            echo 'ERRO: executável principal ausente.'
+            exit 1
+          }
+
+          test -s "$EMBEDDED_AUTH" || {
+
+            echo 'ERRO: RemoteAuth.dylib não foi embutida em Frameworks.'
+
+            echo
+            echo "Arquivos do app:"
+
+            find "$APP" \
+              -maxdepth 4 \
+              -type f \
+              -print
+
+            exit 1
+          }
+
           echo
-          echo "DYLIB:"
-          echo "$EMBEDDED_AUTH"
+          echo "========================================"
+          echo "LC_LOAD_DYLIB"
+          echo "========================================"
 
-          #
-          # RemoteAuth deve ser dependência real do executável.
-          #
-          otool -L "$EXE" \
-            | grep -Fq '@rpath/RemoteAuth.dylib' || {
+          EXE_OTOOL_L="$RUNNER_TEMP/exe-otool-L.txt"
 
-                echo 'ERRO: executável não possui LC_LOAD_DYLIB para RemoteAuth.'
+          otool -L "$EXE" > "$EXE_OTOOL_L"
 
-                otool -L "$EXE"
+          if ! grep -Fq \
+            '@rpath/RemoteAuth.dylib' \
+            "$EXE_OTOOL_L"; then
 
-                exit 1
-              }
+            echo 'ERRO: executável não possui LC_LOAD_DYLIB para RemoteAuth.'
+
+            echo
+            cat "$EXE_OTOOL_L"
+
+            exit 1
+          fi
+
+          echo "RemoteAuth LC_LOAD_DYLIB: OK"
 
           echo
-          echo "LC_LOAD_DYLIB RemoteAuth: OK"
+          echo "========================================"
+          echo "VAULTS"
+          echo "========================================"
 
-          #
-          # Vaults.
-          #
-          otool -l "$EXE" \
-            | grep -q 'sectname __pv3105' || {
-                echo 'ERRO: __pv3105 ausente.'
-                exit 1
-              }
+          EXE_OTOOL="$RUNNER_TEMP/exe-otool.txt"
 
-          otool -l "$EXE" \
-            | grep -q 'sectname __rv3105' || {
-                echo 'ERRO: __rv3105 ausente.'
-                exit 1
-              }
+          otool -l "$EXE" > "$EXE_OTOOL"
+
+          if ! grep -q \
+            'sectname __pv3105' \
+            "$EXE_OTOOL"; then
+
+            echo 'ERRO: seção __pv3105 ausente.'
+            exit 1
+          fi
+
+          if ! grep -q \
+            'sectname __rv3105' \
+            "$EXE_OTOOL"; then
+
+            echo 'ERRO: seção __rv3105 ausente.'
+            exit 1
+          fi
 
           echo "__pv3105: OK"
           echo "__rv3105: OK"
 
-          #
-          # Confirma que o bridge da auth está presente.
-          #
-          strings "$EXE" \
-            | grep -Fq 'RemoteAuthManager' || {
-                echo 'ERRO: bridge RemoteAuthManager não está no executável.'
-                exit 1
-              }
+          echo
+          echo "========================================"
+          echo "REMOTEAUTH BRIDGE"
+          echo "========================================"
 
-          #
-          # Confirma nome.
-          #
+          EXE_STRINGS="$RUNNER_TEMP/exe-strings.txt"
+
+          strings "$EXE" > "$EXE_STRINGS"
+
+          if ! grep -Fq \
+            'RemoteAuthManager' \
+            "$EXE_STRINGS"; then
+
+            echo 'ERRO: bridge RemoteAuthManager não está no executável.'
+            exit 1
+          fi
+
+          echo "RemoteAuthManager bridge: OK"
+
+          echo
+          echo "========================================"
+          echo "APP NAME"
+          echo "========================================"
+
           DISPLAY_NAME="$(/usr/libexec/PlistBuddy \
             -c 'Print :CFBundleDisplayName' \
             "$APP/Info.plist")"
+
+          echo "CFBundleDisplayName: $DISPLAY_NAME"
 
           test "$DISPLAY_NAME" = 'Injetor' || {
             echo "ERRO: nome final é $DISPLAY_NAME"
             exit 1
           }
 
-          #
-          # Confirma Assets.
-          #
+          echo
+          echo "========================================"
+          echo "ASSETS"
+          echo "========================================"
+
           test -s "$APP/Assets.car" || {
-            echo 'ERRO: Assets.car/app icon ausente.'
+            echo 'ERRO: Assets.car ausente.'
             exit 1
           }
 
+          echo "Assets.car: OK"
+
           echo
           echo "========================================"
-          echo "VALIDANDO FINGERPRINT EMBUTIDO"
+          echo "VALIDANDO FINGERPRINT"
           echo "========================================"
 
-          #
-          # Recalcula o fingerprint EXATAMENTE da dylib
-          # que acabou dentro do .app.
-          #
           TMP_SWIFT="$RUNNER_TEMP/embedded-auth.swift"
 
           python3 "$AUTH_GENERATOR" \
             --dylib "$EMBEDDED_AUTH" \
             --swift "$TMP_SWIFT"
 
-          EXPECTED="$(grep 'expectedSHA256' "$AUTH_INTEGRITY" \
-            | sed -E 's/.*"([0-9a-f]+)".*/\1/')"
+          EXPECTED="$(
+            grep 'expectedSHA256' "$AUTH_INTEGRITY" \
+              | sed -E 's/.*"([0-9a-f]+)".*/\1/'
+          )"
 
-          ACTUAL="$(grep 'expectedSHA256' "$TMP_SWIFT" \
-            | sed -E 's/.*"([0-9a-f]+)".*/\1/')"
+          ACTUAL="$(
+            grep 'expectedSHA256' "$TMP_SWIFT" \
+              | sed -E 's/.*"([0-9a-f]+)".*/\1/'
+          )"
 
-          echo "EXPECTED: $EXPECTED"
-          echo "ACTUAL:   $ACTUAL"
+          echo
+          echo "EXPECTED:"
+          echo "$EXPECTED"
+
+          echo
+          echo "ACTUAL:"
+          echo "$ACTUAL"
 
           test -n "$EXPECTED" || {
             echo 'ERRO: fingerprint esperado vazio.'
@@ -582,39 +715,62 @@ jobs:
             exit 1
           }
 
-          test "$EXPECTED" = "$ACTUAL" || {
-            echo 'ERRO: dylib embutida não corresponde ao fingerprint compilado.'
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+
+            echo
+            echo "========================================"
+            echo "ERRO DE INTEGRIDADE"
+            echo "========================================"
+
+            echo "A RemoteAuth.dylib dentro do app não corresponde"
+            echo "ao fingerprint compilado no executável."
+
             exit 1
-          }
+          fi
 
           echo
           echo "FINGERPRINT: OK"
 
-          #
-          # Limpeza final.
-          #
+          echo
+          echo "========================================"
+          echo "RAW PATCH CHECK"
+          echo "========================================"
+
+          RAW_APP="$(
+            find "$APP" \
+              -type f \
+              -name '*.3105' \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          if [ "$RAW_APP" -ne 0 ]; then
+
+            echo 'ERRO: arquivo .3105 cru encontrado dentro do app.'
+
+            find "$APP" \
+              -type f \
+              -name '*.3105' \
+              -print
+
+            exit 1
+          fi
+
+          echo "Nenhum .3105 cru: OK"
+
+          echo
+          echo "========================================"
+          echo "STRIP EXECUTÁVEL"
+          echo "========================================"
+
           strip -S -x "$EXE" || true
 
           rm -rf "$APP/Patches"
           rm -f "$APP/PkgInfo"
 
-          RAW_APP="$(find "$APP" \
-            -type f \
-            -name '*.3105' \
-            | wc -l \
-            | tr -d ' ')"
-
-          test "$RAW_APP" -eq 0 || {
-            echo 'ERRO: .3105 cru encontrado no app.'
-            exit 1
-          }
-
           echo
           echo "APP VALIDADO"
 
-          #
-          # Exporta APP para próximo step.
-          #
           echo "FINAL_APP=$APP" >> "$GITHUB_ENV"
 
       - name: Package IPA
@@ -639,7 +795,7 @@ jobs:
           cp -R "$FINAL_APP" \
             Payload/3105.app
 
-          IPA='Injetor-REMOTE-1.0.1-HARDENED-unsigned.ipa'
+          IPA="Injetor-REMOTE-1.0.1-HARDENED-unsigned.ipa"
 
           rm -f "$IPA"
 
@@ -656,23 +812,34 @@ jobs:
             exit 1
           }
 
-          unzip -l "$IPA" \
-            | grep -Fq \
-              'Payload/3105.app/Frameworks/RemoteAuth.dylib' || {
+          echo
+          echo "========================================"
+          echo "VALIDANDO IPA FINAL"
+          echo "========================================"
 
-                echo 'ERRO: RemoteAuth.dylib ausente da IPA final.'
-                exit 1
-              }
+          IPA_LIST="$RUNNER_TEMP/ipa-list.txt"
+
+          unzip -l "$IPA" > "$IPA_LIST"
+
+          if ! grep -Fq \
+            'Payload/3105.app/Frameworks/RemoteAuth.dylib' \
+            "$IPA_LIST"; then
+
+            echo 'ERRO: RemoteAuth.dylib ausente da IPA final.'
+            exit 1
+          fi
+
+          echo "RemoteAuth.dylib: OK"
 
           echo
           echo "========================================"
-          echo "INJETOR REMOTE BLACKSCREEN FIX OK"
+          echo "BUILD FINALIZADA"
           echo "========================================"
 
           ls -lh "$IPA"
 
           echo
-          echo "IPA SHA256:"
+          echo "SHA256:"
           shasum -a 256 "$IPA"
 
       - name: Upload IPA
